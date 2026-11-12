@@ -1,0 +1,18 @@
+[tools]
+python = "3.12"
+uv = "latest"
+
+[settings]
+python.uv_venv_auto = "create|source"
+
+[tasks.setup]
+description = "Synchronize locked dependencies"
+run = "uv sync"
+
+[tasks.test]
+description = "Run the test suite"
+run = "uv run pytest"
+
+[tasks.check]
+description = "Run project checks"
+depends = ["test"]

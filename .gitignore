@@ -1,0 +1,37 @@
+# Python / packaging / testing
+.venv/
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+
+# Model weights & partial downloads
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+mobileclip*.ts
+*.part
+
+# Videos & inference outputs
+videos/
+runs/
+person_crops/
+person_pose*/
+video_pose*/
+output*/
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Environment & editor
+.env
+.DS_Store

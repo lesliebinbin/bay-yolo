@@ -1,0 +1,9 @@
+# Changes to this file will be overwritten by Copier.
+_commit: 783d853
+_src_path: git@github.com:lesliebinbin/mise-blueprints.git
+author_name: Your Name
+description: A mise and uv managed Python project
+package_name: my_python_project
+project_name: My Python Project
+project_slug: my-python-project
+python_version: '3.12'

@@ -1,0 +1,16 @@
+#+title: My Python Project
+
+A mise and uv managed Python project
+
+* Setup
+
+#+begin_src shell
+mise install
+mise setup
+#+end_src
+
+* Check
+
+#+begin_src shell
+mise check
+#+end_src
