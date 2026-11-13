@@ -13,13 +13,18 @@ readme = { file = "README.org", content-type = "text/plain" }
 requires-python = ">=3.12"
 authors = [{ name = "Your Name" }]
 dependencies = [
-    "accelerate>=1.15.0",
     "clip",
+    "einops>=0.8.2",
     "gradio>=6.31.0",
     "lap>=0.5.12",
+    "lightning>=2.6.6",
     "transformers>=4.53",
     "ultralytics>=8.4.210",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 [project.scripts]
 c_yoloe = "cli.yoloe:main"
@@ -39,10 +44,6 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]
 testpaths = ["tests"]
-
-[[tool.uv.index]]
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true
 
 [tool.uv.sources]
 clip = { git = "https://github.com/ultralytics/CLIP.git", rev = "7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40" }

@@ -233,13 +233,25 @@ def test_roi_clip_slicer_yolo_box(tmp_path):
     cap.release()
 
 
-def test_vjepa2_ssl_module_forward_and_ema(tmp_path):
+def test_vjepa2_ssl_lightning_forward_and_trainer_fit(tmp_path):
+    import lightning as L
     import torch
-    from transformers import VJEPA2Config, VJEPA2Model, VJEPA2ForVideoClassification
+    from torch.utils.data import DataLoader
+    from transformers import VJEPA2Config, VJEPA2ForVideoClassification, VJEPA2Model
     from transformers.models.vjepa2.modeling_vjepa2 import apply_masks
-    from models.vjepa2_ssl import VJEPA2SSLConfig, VJEPA2SSLModule
+    from models.vjepa2_ssl import VJEPA2SSL, VJEPA2SSLConfig
+    from utils.masking import MultiBlockMaskGenerator3D
 
-    # Tiny V-JEPA 2 config to test exact Predictor + masked 3D-RoPE context encoder + EMA
+    # Verify MultiBlockMaskGenerator3D is a plain non-nn.Module dataclass and produces disjoint context/targets
+    assert not isinstance(MultiBlockMaskGenerator3D(), torch.nn.Module)
+    gen = torch.Generator().manual_seed(42)
+    ctx_masks, tgt_masks = MultiBlockMaskGenerator3D(num_targets=3)(2, 4, 4, 4, generator=gen)
+    assert len(ctx_masks) == 1 and len(tgt_masks) == 3
+    for b in range(2):
+        ctx_set = set(ctx_masks[0][b].tolist())
+        tgt_union = set().union(*(t[b].tolist() for t in tgt_masks))
+        assert ctx_set.isdisjoint(tgt_union)
+
     tiny_cfg = VJEPA2Config(
         crop_size=64,
         image_size=64,
@@ -254,18 +266,26 @@ def test_vjepa2_ssl_module_forward_and_ema(tmp_path):
         pred_num_hidden_layers=2,
         pred_num_mask_tokens=4,
     )
-    ssl_module = VJEPA2SSLModule(
+    ssl_model = VJEPA2SSL(
         backbone=VJEPA2Model(tiny_cfg),
-        ssl_config=VJEPA2SSLConfig(frames_per_clip=8, crop_size=64, num_targets=3),
+        ssl_config=VJEPA2SSLConfig(
+            frames_per_clip=8,
+            crop_size=64,
+            num_targets=3,
+            lr=1e-3,
+            ema_momentum_range=(0.5, 0.5),
+        ),
     )
 
-    # Verify target_encoder is frozen while context_encoder & predictor require grad
-    assert all(not p.requires_grad for p in ssl_module.target_encoder.parameters())
-    assert any(p.requires_grad for p in ssl_module.context_encoder.parameters())
-    assert any(p.requires_grad for p in ssl_module.predictor.parameters())
+    # Verify target_encoder is frozen and stays in eval() even when model.train() is called
+    ssl_model.train()
+    assert not ssl_model.target_encoder.training
+    assert all(not p.requires_grad for p in ssl_model.target_encoder.parameters())
+    assert any(p.requires_grad for p in ssl_model.context_encoder.parameters())
+    assert any(p.requires_grad for p in ssl_model.predictor.parameters())
 
     videos = torch.randn(2, 8, 3, 64, 64)
-    out = ssl_module(videos)
+    out = ssl_model(videos)
     assert out.loss.ndim == 0 and torch.isfinite(out.loss)
     assert out.predicted_latents.shape == out.target_latents.shape
     assert 0.0 < out.context_ratio < 1.0
@@ -273,27 +293,34 @@ def test_vjepa2_ssl_module_forward_and_ema(tmp_path):
     # Verify single-target predictor matches HF native VJEPA2Predictor output bit-for-bit!
     single_tgt = [torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]])]
     full_ctx = torch.arange(8, 64).unsqueeze(0).repeat(2, 1)
-    ssl_module.eval()
+    ssl_model.eval()
     with torch.no_grad():
-        full_enc = ssl_module.context_encoder(pixel_values_videos=videos).last_hidden_state
-        hf_pred = ssl_module.predictor(full_enc, [full_ctx], single_tgt).last_hidden_state
-        our_pred = ssl_module.predict_from_masked_context(
+        full_enc = ssl_model.context_encoder(pixel_values_videos=videos).last_hidden_state
+        hf_pred = ssl_model.predictor(full_enc, [full_ctx], single_tgt).last_hidden_state
+        our_pred = ssl_model.predict_from_masked_context(
             apply_masks(full_enc, [full_ctx]), full_ctx, single_tgt
         )
         assert torch.allclose(hf_pred, our_pred, atol=1e-5)
 
-    # Backward step + EMA update + HF save_backbone_pretrained roundtrip into VJEPA2ForVideoClassification
-    ssl_module.train()
-    opt = torch.optim.AdamW([p for p in ssl_module.parameters() if p.requires_grad], lr=1e-3)
-    before_tgt = next(ssl_module.target_encoder.parameters()).clone()
-    out.loss.backward()
-    opt.step()
-    ssl_module.update_target_encoder(momentum=0.5)
-    after_tgt = next(ssl_module.target_encoder.parameters())
+    # End-to-end Lightning Trainer.fit() step (exercises training_step, configure_optimizers, EMA optimizer_step)
+    before_tgt = next(ssl_model.target_encoder.parameters()).clone()
+    loader = DataLoader([torch.randn(8, 3, 64, 64) for _ in range(4)], batch_size=2)
+    trainer = L.Trainer(
+        max_epochs=1,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+    trainer.fit(ssl_model, train_dataloaders=loader)
+
+    after_tgt = next(ssl_model.target_encoder.parameters())
     assert not torch.allclose(before_tgt, after_tgt)
 
     ckpt_dir = tmp_path / "adapted_vjepa2"
-    ssl_module.save_backbone_pretrained(ckpt_dir)
+    ssl_model.save_backbone_pretrained(ckpt_dir)
     probe_model = VJEPA2ForVideoClassification.from_pretrained(ckpt_dir, num_labels=4)
     with torch.no_grad():
         logits = probe_model(pixel_values_videos=videos).logits

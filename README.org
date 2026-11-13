@@ -10,15 +10,16 @@ src/
 │   ├── yoloe.py                # c_yoloe: YOLOE open-vocabulary detection & segmentation
 │   ├── yolo_pose.py            # c_yolo_pose: blank-canvas 17-keypoint pose sketcher
 │   └── yolo_keypoints_extract.py # c_yolo_keypoints_extract: pose CSV features & hand cropper
-├── utils/                      # Shared OOP utilities across CLIs & preprocessing
+├── utils/                      # Shared OOP utilities across CLIs, preprocessing & models
 │   ├── time_span.py            # TimeSpan: HH:MM:SS parsing, seeking & clip boundaries
 │   ├── media.py                # MediaSource & FrameDisplay: stream/video/image I/O & viewer
 │   ├── crops.py                # BBoxCropper & HandCropper: detection & forearm-projected crops
-│   └── pose_features.py        # PoseFeatureExtractor: scale-invariant 17-keypoint features
+│   ├── pose_features.py        # PoseFeatureExtractor: scale-invariant 17-keypoint features
+│   └── masking.py              # MultiBlockMaskGenerator3D: vectorized 3D block mask sampler
 ├── preprocessing/
 │   └── roi_clip_slicer.py      # Slice long CCTV videos into YOLO-normalized ROI .mp4 clips
 └── models/
-    └── vjepa2_ssl.py           # V-JEPA 2 self-supervised domain adaptation (Accelerate)
+    └── vjepa2_ssl.py           # V-JEPA 2 self-supervised domain adaptation (PyTorch Lightning)
 #+end_example
 
 * Setup
@@ -61,8 +62,8 @@ c_yolo_keypoints_extract --source videos/sample01.mp4 --start 00:12:00 --duratio
 # Slice CCTV video into fixed-ROI short clips
 uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --save data/unlabeled
 
-# Self-supervised V-JEPA 2 domain adaptation
-uv run accelerate launch -m models.vjepa2_ssl --data-dir data/unlabeled/clips --output-dir checkpoints/vjepa2_bay
+# Self-supervised V-JEPA 2 domain adaptation (PyTorch Lightning)
+uv run python -m models.vjepa2_ssl --data-dir data/unlabeled/clips --output-dir checkpoints/vjepa2_bay
 #+end_src
 
 * Check
