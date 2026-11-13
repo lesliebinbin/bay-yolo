@@ -22,6 +22,8 @@ from pathlib import Path
 
 import cv2
 
+from utils.time_span import TimeSpan
+
 
 @dataclass(frozen=True)
 class YoloBox:
@@ -105,35 +107,9 @@ def yolo_roi_to_xyxy(roi: YoloBox, frame_width: int, frame_height: int, even_dim
     return x1, y1, x2, y2
 
 
-def parse_hms(value: str) -> float:
-    parts = value.split(":")
-    if len(parts) != 3:
-        raise argparse.ArgumentTypeError(f"expected HH:MM:SS format, got {value!r}")
-    hh_str, mm_str, ss_str = parts
-    if not (hh_str.isdigit() and mm_str.isdigit()):
-        raise argparse.ArgumentTypeError(f"expected HH:MM:SS format, got {value!r}")
-    try:
-        hh, mm, ss = int(hh_str), int(mm_str), float(ss_str)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected HH:MM:SS format, got {value!r}") from exc
-    if mm >= 60 or ss < 0 or ss >= 60 or not math.isfinite(ss):
-        raise argparse.ArgumentTypeError(f"out-of-range HH:MM:SS timestamp: {value!r}")
-    return hh * 3600 + mm * 60 + ss
-
-
-def parse_duration_hms(value: str) -> float:
-    seconds = parse_hms(value)
-    if seconds <= 0:
-        raise argparse.ArgumentTypeError("duration must be greater than 00:00:00")
-    return seconds
-
-
-def format_hms(seconds: float) -> str:
-    total_ms = round(max(0.0, seconds) * 1000)
-    hh, rem_ms = divmod(total_ms, 3_600_000)
-    mm, rem_ms = divmod(rem_ms, 60_000)
-    ss, ms = divmod(rem_ms, 1000)
-    return f"{hh:02d}:{mm:02d}:{ss:02d}.{ms:03d}" if ms else f"{hh:02d}:{mm:02d}:{ss:02d}"
+parse_hms = TimeSpan.parse_hms
+parse_duration_hms = TimeSpan.parse_duration_hms
+format_hms = TimeSpan.format_hms
 
 
 def slice_video_roi_clips(

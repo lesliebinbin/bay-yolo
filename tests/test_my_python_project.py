@@ -1,72 +1,88 @@
 import argparse
+from pathlib import Path
+import shutil
+import subprocess
+
 import pytest
 
+from cli import yolo_keypoints_extract, yolo_pose, yoloe
 import my_python_project
-import yolo_keypoints_extract
-import yolo_pose_sketch_demo
-import yoloe_demo
+from utils.crops import BBoxCropper, HandCropper
+from utils.media import MediaSource
+from utils.pose_features import PoseFeatureExtractor
+from utils.time_span import TimeSpan
 
 
 def test_version():
     assert my_python_project.__version__ == "0.1.0"
 
 
-def test_parse_hms():
-    assert yoloe_demo.parse_hms("00:00:00") == 0.0
-    assert yoloe_demo.parse_hms("01:02:03") == 3723.0
-    assert yoloe_demo.parse_hms("00:00:01.5") == 1.5
+def test_time_span_parsing_and_boundaries():
+    assert TimeSpan.parse_hms("00:00:00") == 0.0
+    assert TimeSpan.parse_hms("01:02:03") == 3723.0
+    assert TimeSpan.parse_hms("00:00:01.5") == 1.5
+    assert TimeSpan.format_hms(3723.5) == "01:02:03.500"
     with pytest.raises(argparse.ArgumentTypeError):
-        yoloe_demo.parse_hms("12:34")
+        TimeSpan.parse_hms("12:34")
     with pytest.raises(argparse.ArgumentTypeError):
-        yoloe_demo.parse_hms("00:60:00")
+        TimeSpan.parse_hms("00:60:00")
     with pytest.raises(argparse.ArgumentTypeError):
-        yoloe_demo.parse_duration_hms("00:00:00")
+        TimeSpan.parse_duration_hms("00:00:00")
+
+    span = TimeSpan(start_sec=10.0, duration_sec=2.0)
+    assert span.describe() == " (start=00:00:10 duration=00:00:02)"
+    assert not span.reached_end(11_000.0, processed_frames=25, fps=25.0)
+    assert span.reached_end(12_000.0, processed_frames=50, fps=25.0)
+    assert span.reached_end(0.0, processed_frames=50, fps=25.0)
 
 
 def test_parse_args_source_kinds(tmp_path):
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"fake")
 
-    args_default = yoloe_demo.parse_args([])
+    args_default = yoloe.parse_args([])
     assert args_default.source_kind == "stream"
     assert args_default.start is None
     assert args_default.duration is None
 
-    args_file_whole = yoloe_demo.parse_args(["--source", str(clip)])
+    args_file_whole = yoloe.parse_args(["--source", str(clip)])
     assert args_file_whole.source_kind == "file"
     assert args_file_whole.start is None
     assert args_file_whole.duration is None
 
-    args_file_span = yoloe_demo.parse_args(
+    args_file_span = yoloe.parse_args(
         ["--source", str(clip), "--start", "00:01:00", "--duration", "00:00:10"]
     )
     assert args_file_span.start == 60.0
     assert args_file_span.duration == 10.0
 
-    args_webcam = yoloe_demo.parse_args(["--source", "0"])
+    args_webcam = yoloe.parse_args(["--source", "0"])
     assert args_webcam.source_kind == "webcam"
 
     with pytest.raises(SystemExit):
-        yoloe_demo.parse_args(["--start", "00:00:05"])
+        yoloe.parse_args(["--start", "00:00:05"])
 
     with pytest.raises(SystemExit):
-        yoloe_demo.parse_args(["--source", "0", "--duration", "00:00:05"])
+        yoloe.parse_args(["--source", "0", "--duration", "00:00:05"])
 
     with pytest.raises(SystemExit):
-        yoloe_demo.parse_args(["--source", str(tmp_path / "missing.mp4")])
+        yoloe.parse_args(["--source", str(tmp_path / "missing.mp4")])
 
 
-def test_save_detection_crops_and_save_validation(tmp_path):
+def test_bbox_cropper_and_save_validation(tmp_path):
     import numpy as np
     import torch
 
     with pytest.raises(SystemExit):
-        yoloe_demo.parse_args(["--save", "out.mp4"])
+        yoloe.parse_args(["--save", "out.mp4"])
 
     existing_file = tmp_path / "already_a_file"
     existing_file.write_text("x")
     with pytest.raises(SystemExit):
-        yoloe_demo.parse_args(["--save", str(existing_file)])
+        yoloe.parse_args(["--save", str(existing_file)])
+
+    with pytest.raises(SystemExit):
+        yolo_keypoints_extract.parse_args(["--save", "features.csv"])
 
     class DummyBoxes:
         cls = torch.tensor([0.0, 0.0, 1.0])
@@ -81,8 +97,8 @@ def test_save_detection_crops_and_save_validation(tmp_path):
     frame = np.zeros((600, 800, 3), dtype=np.uint8)
     crops_dir = tmp_path / "run_out" / "crops"
     crops_dir.mkdir(parents=True)
-    saved = yoloe_demo.save_detection_crops(
-        frame, DummyBoxes(), {0: "an engineer with clear visible PPE", 1: "truck"}, crops_dir, 212, 0.35
+    saved = BBoxCropper(crop_pad=0.35).save_crops(
+        frame, DummyBoxes(), {0: "an engineer with clear visible PPE", 1: "truck"}, crops_dir, 212
     )
     assert saved == 3
     names = sorted(p.name for p in crops_dir.glob("*.jpg"))
@@ -93,12 +109,11 @@ def test_save_detection_crops_and_save_validation(tmp_path):
     ]
 
 
-def test_pose_sketch_demo_helpers(tmp_path):
-    from pathlib import Path
+def test_pose_sketch_helpers(tmp_path):
     import numpy as np
 
     paths = [Path("crop_299_0.jpg"), Path("crop_2_0.jpg"), Path("crop_300_0.jpg")]
-    assert [p.name for p in sorted(paths, key=yolo_pose_sketch_demo.natural_sort_key)] == [
+    assert [p.name for p in sorted(paths, key=MediaSource.natural_sort_key)] == [
         "crop_2_0.jpg",
         "crop_299_0.jpg",
         "crop_300_0.jpg",
@@ -106,11 +121,11 @@ def test_pose_sketch_demo_helpers(tmp_path):
 
     img_dir = tmp_path / "crops"
     img_dir.mkdir()
-    args = yolo_pose_sketch_demo.parse_args(["--source", str(img_dir), "--show"])
+    args = yolo_pose.parse_args(["--source", str(img_dir), "--show"])
     assert args.source_kind == "image_dir"
 
     with pytest.raises(SystemExit):
-        yolo_pose_sketch_demo.parse_args(["--source", str(img_dir), "--start", "00:00:05", "--show"])
+        yolo_pose.parse_args(["--source", str(img_dir), "--start", "00:00:05", "--show"])
 
     class FakeResult:
         orig_img = np.full((100, 60, 3), 255, dtype=np.uint8)
@@ -122,16 +137,16 @@ def test_pose_sketch_demo_helpers(tmp_path):
             out[20, 30] = [0, 255, 0]
             return out
 
-    sketch = yolo_pose_sketch_demo.render_sketch(FakeResult())
+    sketch = yolo_pose.render_sketch(FakeResult())
     assert sketch.shape == (100, 60, 3)
     assert int(sketch[0, 0].max()) == 0
     assert list(sketch[20, 30]) == [0, 255, 0]
 
-    sbs = yolo_pose_sketch_demo.render_sketch(FakeResult(), side_by_side=True)
+    sbs = yolo_pose.render_sketch(FakeResult(), side_by_side=True)
     assert sbs.shape == (100, 120, 3)
 
 
-def test_keypoints_extract_features_and_hand_boxes():
+def test_pose_feature_extractor_and_hand_cropper():
     import numpy as np
 
     xy = np.zeros((17, 2), dtype=np.float32)
@@ -145,19 +160,32 @@ def test_keypoints_extract_features_and_hand_boxes():
     xy[12], conf[12] = [135.0, 320.0], 0.8
     box = np.array([70.0, 160.0, 170.0, 480.0], dtype=np.float32)
 
-    row = yolo_keypoints_extract.compute_person_features(xy, conf, box, 0.75, "sample01.mp4", 212, 0, 728.4)
+    extractor = PoseFeatureExtractor()
+    row = extractor.extract(xy, conf, box, 0.75, "sample01.mp4", 212, 0, 728.4)
+    assert set(row.keys()) == set(extractor.columns())
     assert row["back_facing"] == 1
     assert 60.0 < float(row["left_elbow_deg"]) < 90.0
     assert row["left_wrist_nx"] < 0  # left of chest center
 
-    hands = yolo_keypoints_extract.compute_hand_boxes(
-        xy, conf, box, (1440, 2560), wrist_conf=0.4, hand_shift=0.35, raised_only=True
-    )
+    cropper = HandCropper(wrist_conf=0.4, hand_shift=0.35, raised_only=True)
+    hands = cropper.compute_boxes(xy, conf, box, (1440, 2560))
     assert len(hands) == 1
     assert hands[0]["side"] == "left"
     # Center shifted past wrist (x < 60, y < 240) along elbow->wrist vector (-30, -20)
     assert hands[0]["center"][0] < 60
     assert hands[0]["center"][1] < 240
+
+
+def test_console_scripts_installed():
+    import sys
+
+    for cmd in ("c_yoloe", "c_yolo_pose", "c_yolo_keypoints_extract"):
+        candidate = Path(sys.executable).with_name(cmd)
+        exe = shutil.which(cmd) or (str(candidate) if candidate.is_file() else None)
+        assert exe is not None, f"{cmd} not found in venv/bin or PATH"
+        proc = subprocess.run([exe, "--help"], capture_output=True, text=True, check=False)
+        assert proc.returncode == 0
+        assert cmd in proc.stdout
 
 
 def test_roi_clip_slicer_yolo_box(tmp_path):

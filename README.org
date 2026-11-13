@@ -1,16 +1,72 @@
-#+title: My Python Project
+#+title: Bay YOLO
 
-A mise and uv managed Python project
+Industrial/bay CCTV computer vision and video action understanding toolkit, managed with =mise= and =uv=.
+
+* Project Structure
+
+#+begin_example
+src/
+├── cli/                        # Console entrypoints installed into venv/bin
+│   ├── yoloe.py                # c_yoloe: YOLOE open-vocabulary detection & segmentation
+│   ├── yolo_pose.py            # c_yolo_pose: blank-canvas 17-keypoint pose sketcher
+│   └── yolo_keypoints_extract.py # c_yolo_keypoints_extract: pose CSV features & hand cropper
+├── utils/                      # Shared OOP utilities across CLIs & preprocessing
+│   ├── time_span.py            # TimeSpan: HH:MM:SS parsing, seeking & clip boundaries
+│   ├── media.py                # MediaSource & FrameDisplay: stream/video/image I/O & viewer
+│   ├── crops.py                # BBoxCropper & HandCropper: detection & forearm-projected crops
+│   └── pose_features.py        # PoseFeatureExtractor: scale-invariant 17-keypoint features
+├── preprocessing/
+│   └── roi_clip_slicer.py      # Slice long CCTV videos into YOLO-normalized ROI .mp4 clips
+└── models/
+    └── vjepa2_ssl.py           # V-JEPA 2 self-supervised domain adaptation (Accelerate)
+#+end_example
 
 * Setup
 
 #+begin_src shell
 mise install
-mise setup
+mise setup   # runs `uv sync` and installs CLI binaries into venv/bin
+#+end_src
+
+* CLI Commands (=venv/bin=)
+
+Custom YOLO commands are prefixed with =c_= to avoid conflicting with Ultralytics' built-in =yolo= CLI. When =mise= activates =venv=, run them directly (or prefix with =uv run=):
+
+** 1. =c_yoloe= — Open-Vocabulary Detection & Segmentation
+#+begin_src shell
+c_yoloe --help
+c_yoloe --prompts worker truck --max-frames 100
+c_yoloe --source videos/sample01.mp4 --start 00:05:00 --duration 00:00:10 --save output_run
+c_yoloe --source videos/sample01.mp4 --show both
+#+end_src
+
+** 2. =c_yolo_pose= — Blank-Canvas Pose Skeleton Sketch
+#+begin_src shell
+c_yolo_pose --help
+c_yolo_pose --source person_crops/crops --show --fps 8
+c_yolo_pose --source videos/sample01.mp4 --start 00:12:00 --duration 00:00:15 --show --side-by-side
+c_yolo_pose --source person_crops/crops --save person_pose_sketch
+#+end_src
+
+** 3. =c_yolo_keypoints_extract= — Pose CSV Features & Hand Cropper
+#+begin_src shell
+c_yolo_keypoints_extract --help
+c_yolo_keypoints_extract --source videos/sample01.mp4 --start 00:12:00 --duration 00:00:15 --save output_keypoints
+c_yolo_keypoints_extract --source videos/sample01.mp4 --start 00:12:00 --duration 00:01:30 --raised-only --show
+#+end_src
+
+* Video ROI Slicing & V-JEPA 2 SSL
+
+#+begin_src shell
+# Slice CCTV video into fixed-ROI short clips
+uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --save data/unlabeled
+
+# Self-supervised V-JEPA 2 domain adaptation
+uv run accelerate launch -m models.vjepa2_ssl --data-dir data/unlabeled/clips --output-dir checkpoints/vjepa2_bay
 #+end_src
 
 * Check
 
 #+begin_src shell
-mise check
+mise check   # runs `uv run pytest`
 #+end_src
