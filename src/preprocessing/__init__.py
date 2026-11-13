@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from preprocessing.roi_clip_slicer import (
         DEFAULT_YOLO_ROI,
+        SplitSpec,
         YoloBox,
         parse_yolo_roi,
         slice_video_roi_clips,
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_YOLO_ROI",
+    "SplitSpec",
     "YoloBox",
     "parse_yolo_roi",
     "slice_video_roi_clips",

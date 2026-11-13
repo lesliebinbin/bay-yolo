@@ -8,15 +8,17 @@ Default ROI is the bottom-left quadrant (`1/2` width x `1/2` height):
 Run from the project root:
 
     uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --save data/unlabeled
-    uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --start 00:10:00 --duration 00:05:00 --save data/unlabeled
-    uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --roi 0.25 0.75 0.5 0.5 --clip-sec 5 --stride-sec 5 --save data/unlabeled
+    uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --split 3:1:1 --seed 42 --save data/unlabeled
+    uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --roi 0.25 0.75 0.5 0.5 --clip-sec 4 --stride-sec 2 --target-fps 5 --resize 256 --split 3:2 --seed 42 --save data/unlabeled
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import math
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -112,6 +114,44 @@ parse_duration_hms = TimeSpan.parse_duration_hms
 format_hms = TimeSpan.format_hms
 
 
+@dataclass(frozen=True)
+class SplitSpec:
+    """Weighted probabilistic split configuration (e.g. `'3:1:1'` -> `train/val/test`)."""
+
+    names: tuple[str, ...]
+    weights: tuple[float, ...]
+
+    @classmethod
+    def default_names(cls, count: int) -> tuple[str, ...]:
+        if count == 2:
+            return ("train", "val")
+        if count == 3:
+            return ("train", "val", "test")
+        return tuple(f"split_{i}" for i in range(count))
+
+    @classmethod
+    def parse(cls, spec: str | list[float] | tuple[float, ...], names: list[str] | tuple[str, ...] | None = None) -> SplitSpec:
+        parts = spec.split(":") if isinstance(spec, str) else [str(v) for v in spec]
+        if len(parts) < 2:
+            raise ValueError(f"split requires at least 2 colon-separated weights (e.g. '3:2' or '3:1:1'), got {spec!r}")
+        try:
+            weights = tuple(float(p) for p in parts)
+        except ValueError as exc:
+            raise ValueError(f"invalid numeric weights in split {spec!r}") from exc
+        if any(not math.isfinite(w) or w <= 0 for w in weights):
+            raise ValueError(f"all split weights must be > 0, got {weights}")
+
+        resolved_names = tuple(names) if names is not None else cls.default_names(len(weights))
+        if len(resolved_names) != len(weights):
+            raise ValueError(f"split_names count ({len(resolved_names)}) must match split weights ({len(weights)})")
+        if len(set(resolved_names)) != len(resolved_names) or any(not n or "/" in n or "\\" in n for n in resolved_names):
+            raise ValueError(f"invalid or duplicate split names: {resolved_names!r}")
+        return cls(names=resolved_names, weights=weights)
+
+    def choose(self, rng: random.Random) -> str:
+        return rng.choices(self.names, weights=self.weights, k=1)[0]
+
+
 def slice_video_roi_clips(
     source: str | Path,
     save_dir: str | Path,
@@ -123,6 +163,9 @@ def slice_video_roi_clips(
     duration_sec: float | None = None,
     resize: int | None = None,
     min_clip_ratio: float = 0.8,
+    split: SplitSpec | str | None = None,
+    split_names: list[str] | tuple[str, ...] | None = None,
+    seed: int | None = None,
 ) -> list[Path]:
     """Slice `source` video into ROI-cropped `.mp4` clips + `manifest.csv` + `roi_preview.jpg`."""
     source_path = Path(source)
@@ -134,9 +177,21 @@ def slice_video_roi_clips(
     if stride_sec <= 0:
         raise ValueError("stride_sec must be > 0")
 
+    split_spec = (
+        split
+        if isinstance(split, SplitSpec) or split is None
+        else SplitSpec.parse(split, names=split_names)
+    )
+    if split_spec is not None and split_names is not None and tuple(split_names) != split_spec.names:
+        split_spec = SplitSpec.parse(split_spec.weights, names=split_names)
+    rng = random.Random(seed)
+
     out_dir = Path(save_dir)
     clips_dir = out_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
+    if split_spec is not None:
+        for s_name in split_spec.names:
+            (clips_dir / s_name).mkdir(parents=True, exist_ok=True)
 
     cap = cv2.VideoCapture(str(source_path), cv2.CAP_FFMPEG)
     if not cap.isOpened():
@@ -189,7 +244,8 @@ def slice_video_roi_clips(
             f"{stem}_{format_hms(s_sec).replace(':', '-')}"
             f"__to__{format_hms(end_s).replace(':', '-')}_clip{c_idx:05d}.mp4"
         )
-        clip_path = clips_dir / clip_name
+        chosen_split = split_spec.choose(rng) if split_spec is not None else ""
+        clip_path = (clips_dir / chosen_split / clip_name) if chosen_split else (clips_dir / clip_name)
         writer = cv2.VideoWriter(str(clip_path), cv2.VideoWriter_fourcc(*"mp4v"), out_fps, (out_w, out_h))
         try:
             for crop_frame in frames_buf:
@@ -200,6 +256,7 @@ def slice_video_roi_clips(
         manifest_rows.append(
             {
                 "clip_path": str(clip_path.relative_to(out_dir)),
+                "split": chosen_split,
                 "source": source_path.name,
                 "start_sec": round(s_sec, 3),
                 "end_sec": round(end_s, 3),
@@ -273,6 +330,7 @@ def slice_video_roi_clips(
             f,
             fieldnames=[
                 "clip_path",
+                "split",
                 "source",
                 "start_sec",
                 "end_sec",
@@ -313,16 +371,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stride-sec", type=float, default=None, help="Sliding stride in seconds (default: clip-sec)")
     parser.add_argument("--target-fps", type=float, default=None, help="Optional downsampled clip FPS (default: keep source FPS)")
     parser.add_argument("--resize", type=int, default=None, help="Optional square output resolution (e.g. 256 or 384)")
+    parser.add_argument(
+        "--split",
+        default=None,
+        metavar="RATIOS",
+        help="Optional colon-separated split weights, e.g. '3:2' (train/val), '3:1:1' (train/val/test), or '4:1:1:1'",
+    )
+    parser.add_argument(
+        "--split-names",
+        nargs="+",
+        default=None,
+        metavar="NAME",
+        help="Optional custom subfolder names matching --split weights (e.g. --split 3:1:1 --split-names ssl probe test)",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible --split assignment")
     args = parser.parse_args(argv)
     try:
         args.roi_box = parse_yolo_roi(args.roi)
+        if args.split is None and args.split_names is not None:
+            raise ValueError("--split-names requires --split")
+        args.split_spec = SplitSpec.parse(args.split, names=args.split_names) if args.split is not None else None
     except ValueError as exc:
         parser.error(str(exc))
     return args
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     clips = slice_video_roi_clips(
         source=args.source,
         save_dir=args.save,
@@ -333,9 +408,16 @@ def main() -> None:
         start_sec=args.start,
         duration_sec=args.duration,
         resize=args.resize,
+        split=args.split_spec,
+        seed=args.seed,
     )
+    split_summary = ""
+    if args.split_spec is not None:
+        counts = Counter(p.parent.name for p in clips)
+        breakdown = ", ".join(f"{name}={counts.get(name, 0)}" for name in args.split_spec.names)
+        split_summary = f" [{breakdown}]"
     print(
-        f"saved {len(clips)} ROI clip(s) -> {Path(args.save) / 'clips'} "
+        f"saved {len(clips)} ROI clip(s){split_summary} -> {Path(args.save) / 'clips'} "
         f"(YOLO ROI={args.roi_box.x_center:.2f},{args.roi_box.y_center:.2f},{args.roi_box.width:.2f},{args.roi_box.height:.2f})"
     )
 

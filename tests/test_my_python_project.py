@@ -193,6 +193,8 @@ def test_roi_clip_slicer_yolo_box(tmp_path):
     import numpy as np
     from preprocessing.roi_clip_slicer import (
         DEFAULT_YOLO_ROI,
+        SplitSpec,
+        parse_args as parse_slicer_args,
         parse_yolo_roi,
         slice_video_roi_clips,
         yolo_roi_to_xyxy,
@@ -231,6 +233,24 @@ def test_roi_clip_slicer_yolo_box(tmp_path):
     assert int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) == 100
     assert int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 50
     cap.release()
+
+    # Verify SplitSpec smart naming (2 -> train/val, 3 -> train/val/test, 4 -> split_0..3) & deterministic --seed
+    assert SplitSpec.parse("3:2").names == ("train", "val")
+    assert SplitSpec.parse("3:1:1").names == ("train", "val", "test")
+    assert SplitSpec.parse("4:1:1:1").names == ("split_0", "split_1", "split_2", "split_3")
+    assert SplitSpec.parse("3:1", names=["ssl", "holdout"]).names == ("ssl", "holdout")
+    with pytest.raises(ValueError):
+        SplitSpec.parse("3")
+    with pytest.raises(SystemExit):
+        parse_slicer_args(["--source", str(src_mp4), "--save", str(out_dir), "--split-names", "a", "b"])
+
+    split_dir_a = tmp_path / "split_a"
+    split_dir_b = tmp_path / "split_b"
+    clips_a = slice_video_roi_clips(src_mp4, split_dir_a, clip_sec=0.2, stride_sec=0.2, split="3:1:1", seed=123)
+    clips_b = slice_video_roi_clips(src_mp4, split_dir_b, clip_sec=0.2, stride_sec=0.2, split="3:1:1", seed=123)
+    assert len(clips_a) == 10
+    assert [p.relative_to(split_dir_a) for p in clips_a] == [p.relative_to(split_dir_b) for p in clips_b]
+    assert all(p.parent.name in {"train", "val", "test"} for p in clips_a)
 
 
 def test_vjepa2_ssl_lightning_forward_and_trainer_fit(tmp_path):

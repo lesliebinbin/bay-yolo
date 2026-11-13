@@ -59,11 +59,13 @@ c_yolo_keypoints_extract --source videos/sample01.mp4 --start 00:12:00 --duratio
 * Video ROI Slicing & V-JEPA 2 SSL
 
 #+begin_src shell
-# Slice CCTV video into fixed-ROI short clips
-uv run python -m preprocessing.roi_clip_slicer --source videos/sample01.mp4 --save data/unlabeled
+# Slice CCTV video into fixed-ROI short clips (with optional probabilistic train/val/test split)
+uv run python -m preprocessing.roi_clip_slicer \
+  --source videos/sample01.mp4 --clip-sec 4 --stride-sec 2 --target-fps 5 --resize 256 \
+  --split 3:1:1 --seed 42 --save data/unlabeled
 
 # Self-supervised V-JEPA 2 domain adaptation (PyTorch Lightning)
-uv run python -m models.vjepa2_ssl --data-dir data/unlabeled/clips --output-dir checkpoints/vjepa2_bay
+uv run python -m models.vjepa2_ssl --data-dir data/unlabeled/clips/train --output-dir checkpoints/vjepa2_bay
 #+end_src
 
 * Check
