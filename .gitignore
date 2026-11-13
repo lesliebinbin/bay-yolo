@@ -20,8 +20,10 @@ __pycache__/
 mobileclip*.ts
 *.part
 
-# Videos & inference outputs
+# Videos, datasets, checkpoints & inference outputs
 videos/
+data/
+checkpoints/
 runs/
 person_crops/
 person_pose*/
@@ -31,6 +33,8 @@ output*/
 *.avi
 *.mkv
 *.mov
+*.safetensors
+*.docx
 
 # Environment & editor
 .env
