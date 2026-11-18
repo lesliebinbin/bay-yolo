@@ -21,7 +21,28 @@ configure_opencv_ffmpeg()
 import cv2  # noqa: E402
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov"}
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
+
+
+def read_video_clip_rgb(path: Path, num_frames: int = 16) -> np.ndarray:
+    """Uniformly sample `num_frames` RGB frames `(T, H, W, 3)` from a video file using OpenCV."""
+    cap = cv2.VideoCapture(str(path), cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open video clip: {path}")
+    frames_rgb: list[np.ndarray] = []
+    try:
+        while True:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            frames_rgb.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        cap.release()
+    if not frames_rgb:
+        raise RuntimeError(f"decoded 0 frames from video clip: {path}")
+    indices = np.linspace(0, len(frames_rgb) - 1, num=num_frames).round().astype(int)
+    return np.stack([frames_rgb[i] for i in indices], axis=0)
+
 
 
 @dataclass(frozen=True)

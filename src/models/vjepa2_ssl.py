@@ -5,68 +5,23 @@ Architecture (Assran et al., V-JEPA / V-JEPA 2):
 - `context_encoder`: encodes ONLY unmasked 3D space-time context tokens via 3D-RoPE `position_mask`.
 - `predictor`: predicts target latent representations at masked 3D positions.
 - `target_encoder`: stop-gradient EMA copy of `context_encoder` updated automatically in `optimizer_step`.
-
-Example CLI usage (single GPU or multi-GPU via Lightning `Trainer`):
-
-    uv run python -m models.vjepa2_ssl --data-dir data/unlabeled/clips --output-dir checkpoints/vjepa2_bay
-    uv run python -m models.vjepa2_ssl --data-dir data/unlabeled/clips --devices 2 --precision bf16-mixed
 """
 
 from __future__ import annotations
 
-import argparse
 import copy
-import math
-from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
-from einops import repeat
 import lightning as L
-import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoVideoProcessor, VJEPA2Config, VJEPA2Model
+from einops import repeat
+from transformers import VJEPA2Config, VJEPA2Model
 from transformers.models.vjepa2.modeling_vjepa2 import apply_masks
 
+from config.vjepa2_config import VJEPA2SSLConfig, VJEPA2SSLOutput
 from utils.masking import MultiBlockMaskGenerator3D
-
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
-
-
-@dataclass
-class VJEPA2SSLConfig:
-    """Configuration for V-JEPA 2 self-supervised domain adaptation and optimization."""
-
-    model_name_or_path: str = "facebook/vjepa2-vitl-fpc64-256"
-    frames_per_clip: int = 16
-    crop_size: int = 256
-    num_targets: int = 4
-    spatial_scale: tuple[float, float] = (0.15, 0.35)
-    temporal_scale: tuple[float, float] = (0.50, 1.00)
-    aspect_ratio: tuple[float, float] = (0.75, 1.50)
-    ema_momentum_range: tuple[float, float] = (0.996, 0.9995)
-    loss_beta: float = 1.0
-    normalize_targets: bool = True
-    lr: float = 1e-5
-    weight_decay: float = 0.04
-
-
-@dataclass
-class VJEPA2SSLOutput:
-    """Structured output returned by `VJEPA2SSL.forward`."""
-
-    loss: torch.Tensor
-    predicted_latents: torch.Tensor
-    target_latents: torch.Tensor
-    context_ratio: float
-    target_ratio: float
-
-
-def cosine_ema_schedule(step: int, total_steps: int, m_start: float = 0.996, m_end: float = 0.9995) -> float:
-    progress = min(max(step / max(total_steps, 1), 0.0), 1.0)
-    return m_end - (m_end - m_start) * 0.5 * (1.0 + math.cos(math.pi * progress))
+from utils.training_utils import cosine_ema_schedule
 
 
 class VJEPA2SSL(L.LightningModule):
@@ -268,142 +223,3 @@ class VJEPA2SSL(L.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
-
-
-def read_video_clip_rgb(path: Path, num_frames: int = 16) -> np.ndarray:
-    """Uniformly sample `num_frames` RGB frames `(T, H, W, 3)` from a video file using OpenCV."""
-    cap = cv2.VideoCapture(str(path), cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        raise RuntimeError(f"cannot open video clip: {path}")
-    frames_rgb: list[np.ndarray] = []
-    try:
-        while True:
-            ok, bgr = cap.read()
-            if not ok:
-                break
-            frames_rgb.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-    finally:
-        cap.release()
-    if not frames_rgb:
-        raise RuntimeError(f"decoded 0 frames from video clip: {path}")
-    indices = np.linspace(0, len(frames_rgb) - 1, num=num_frames).round().astype(int)
-    return np.stack([frames_rgb[i] for i in indices], axis=0)
-
-
-class UnlabeledClipDataset(Dataset):
-    """Unlabeled video clip dataset scanning any folder recursively (no class subfolders needed)."""
-
-    def __init__(self, root_dir: str | Path, frames_per_clip: int = 16) -> None:
-        self.root_dir = Path(root_dir)
-        self.frames_per_clip = frames_per_clip
-        self.paths = sorted(
-            p for p in self.root_dir.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
-        )
-        if not self.paths:
-            raise FileNotFoundError(f"no video clips found under {self.root_dir}")
-
-    def __len__(self) -> int:
-        return len(self.paths)
-
-    def __getitem__(self, index: int) -> np.ndarray:
-        return read_video_clip_rgb(self.paths[index], num_frames=self.frames_per_clip)
-
-
-class UnlabeledClipDataModule(L.LightningDataModule):
-    """LightningDataModule wrapping `UnlabeledClipDataset` and an HF `AutoVideoProcessor`."""
-
-    def __init__(
-        self,
-        data_dir: str | Path,
-        processor,
-        frames_per_clip: int = 16,
-        batch_size: int = 4,
-        num_workers: int = 4,
-    ) -> None:
-        super().__init__()
-        self.data_dir = Path(data_dir)
-        self.processor = processor
-        self.frames_per_clip = frames_per_clip
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.dataset: UnlabeledClipDataset | None = None
-
-    def setup(self, stage: str | None = None) -> None:
-        if self.dataset is None:
-            self.dataset = UnlabeledClipDataset(self.data_dir, frames_per_clip=self.frames_per_clip)
-
-    def _collate(self, batch_np: list[np.ndarray]) -> torch.Tensor:
-        return self.processor(batch_np, return_tensors="pt")["pixel_values_videos"]
-
-    def train_dataloader(self) -> DataLoader:
-        assert self.dataset is not None
-        return DataLoader(
-            self.dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            collate_fn=self._collate,
-        )
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-dir", required=True, help="Directory containing unlabeled ROI .mp4 clips")
-    parser.add_argument("--output-dir", default="checkpoints/vjepa2_ssl", help="Where to save adapted HF checkpoint")
-    parser.add_argument("--model", default="facebook/vjepa2-vitl-fpc64-256", help="HF model ID or local path")
-    parser.add_argument("--frames-per-clip", type=int, default=16, help="Sampled frames per clip (default: 16)")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
-    parser.add_argument("--grad-accum", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-5, help="Gentle LR for domain adaptation (default: 1e-5)")
-    parser.add_argument("--weight-decay", type=float, default=0.04)
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--devices", default="auto", help="Devices per node, e.g. 'auto', '1', '2'")
-    parser.add_argument(
-        "--precision",
-        default="bf16-mixed",
-        choices=["32-true", "16-mixed", "bf16-mixed"],
-        help="Lightning training precision (default: bf16-mixed)",
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
-    processor = AutoVideoProcessor.from_pretrained(args.model)
-    ssl_cfg = VJEPA2SSLConfig(
-        model_name_or_path=args.model,
-        frames_per_clip=args.frames_per_clip,
-        crop_size=processor.crop_size["height"],
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
-    model = VJEPA2SSL.from_pretrained(args.model, ssl_config=ssl_cfg)
-    datamodule = UnlabeledClipDataModule(
-        data_dir=args.data_dir,
-        processor=processor,
-        frames_per_clip=args.frames_per_clip,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-    )
-
-    devices = int(args.devices) if str(args.devices).isdigit() else args.devices
-    trainer = L.Trainer(
-        max_epochs=args.epochs,
-        devices=devices,
-        precision=args.precision,
-        accumulate_grad_batches=args.grad_accum,
-        gradient_clip_val=1.0,
-        default_root_dir=args.output_dir,
-    )
-    trainer.fit(model, datamodule=datamodule)
-
-    if trainer.is_global_zero:
-        model.save_backbone_pretrained(args.output_dir, use_target_encoder=True)
-        processor.save_pretrained(args.output_dir)
-        print(f"saved adapted V-JEPA 2 checkpoint -> {args.output_dir}")
-
-
-if __name__ == "__main__":
-    main()
