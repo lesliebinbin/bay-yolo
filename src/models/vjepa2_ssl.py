@@ -24,6 +24,8 @@ import cv2
 from einops import repeat
 import lightning as L
 import numpy as np
+from peft import LoraConfig, inject_adapter_in_model
+from peft.tuners.lora import LoraLayer
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
@@ -33,11 +35,12 @@ from transformers.models.vjepa2.modeling_vjepa2 import apply_masks
 from utils.masking import MultiBlockMaskGenerator3D
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
+LORA_ATTENTION_TARGET_REGEX = r".*attention\.(query|key|value|proj)$"
 
 
 @dataclass
 class VJEPA2SSLConfig:
-    """Configuration for V-JEPA 2 self-supervised domain adaptation and optimization."""
+    """Configuration for V-JEPA 2 self-supervised domain adaptation, LoRA, and optimization."""
 
     model_name_or_path: str = "facebook/vjepa2-vitl-fpc64-256"
     frames_per_clip: int = 16
@@ -49,8 +52,12 @@ class VJEPA2SSLConfig:
     ema_momentum_range: tuple[float, float] = (0.996, 0.9995)
     loss_beta: float = 1.0
     normalize_targets: bool = True
-    lr: float = 1e-5
+    lr: float = 1e-4
     weight_decay: float = 0.04
+    lora_rank: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    gradient_checkpointing: bool = True
 
 
 @dataclass
@@ -81,12 +88,32 @@ class VJEPA2SSL(L.LightningModule):
         self.ssl_config = ssl_config or VJEPA2SSLConfig()
         self.config: VJEPA2Config = backbone.config
 
-        self.context_encoder = backbone.encoder
-        self.predictor = backbone.predictor
+        if self.ssl_config.gradient_checkpointing:
+            backbone.gradient_checkpointing_enable()
 
+        # Copy clean unadapted encoder for the stop-gradient EMA teacher before injecting LoRA
         self.target_encoder = copy.deepcopy(backbone.encoder)
+        self.target_encoder.gradient_checkpointing = False
+        for layer_mod in self.target_encoder.layer:
+            layer_mod.gradient_checkpointing = False
         self.target_encoder.eval()
         self.target_encoder.requires_grad_(False)
+
+        self.context_encoder = backbone.encoder
+        self.predictor = backbone.predictor
+        # HF from_pretrained() initializes modules in eval() mode, which Lightning preserves by default
+        # and which silently disables HF GradientCheckpointingLayer (`if self.gradient_checkpointing and self.training`).
+        self.context_encoder.train()
+        self.predictor.train()
+
+        if self.ssl_config.lora_rank > 0:
+            lora_cfg = LoraConfig(
+                r=self.ssl_config.lora_rank,
+                lora_alpha=self.ssl_config.lora_alpha,
+                lora_dropout=self.ssl_config.lora_dropout,
+                target_modules=LORA_ATTENTION_TARGET_REGEX,
+            )
+            inject_adapter_in_model(lora_cfg, self.context_encoder)
 
         self.mask_generator = MultiBlockMaskGenerator3D(
             num_targets=self.ssl_config.num_targets,
@@ -127,6 +154,8 @@ class VJEPA2SSL(L.LightningModule):
     def encode_context(self, pixel_values_videos: torch.Tensor, context_idx: torch.Tensor) -> torch.Tensor:
         """Encode ONLY visible `context_idx` `(B, N_ctx)` patches while preserving 3D-RoPE positions."""
         hidden_states = apply_masks(self.context_encoder.embeddings(pixel_values_videos), [context_idx])
+        if self.training and self.ssl_config.gradient_checkpointing and not hidden_states.requires_grad:
+            hidden_states = hidden_states.requires_grad_(True)
         for layer_module in self.context_encoder.layer:
             hidden_states = layer_module(hidden_states, position_mask=context_idx)[0]
         return self.context_encoder.layernorm(hidden_states)
@@ -178,9 +207,18 @@ class VJEPA2SSL(L.LightningModule):
 
     @torch.no_grad()
     def update_target_encoder(self, momentum: float = 0.998) -> None:
-        """Exponential Moving Average update: `θ_target <- m * θ_target + (1 - m) * θ_context`."""
+        """Exponential Moving Average update (`θ_target <- m * θ_target + (1 - m) * θ_context_effective`)."""
         if not (0.0 <= momentum <= 1.0):
             raise ValueError(f"EMA momentum must be in [0, 1], got {momentum}")
+        if self.ssl_config.lora_rank > 0:
+            tgt_modules = dict(self.target_encoder.named_modules())
+            for name, mod in self.context_encoder.named_modules():
+                if isinstance(mod, LoraLayer):
+                    eff_w = mod.base_layer.weight.detach() + mod.get_delta_weight("default").detach()
+                    tgt_w = tgt_modules[name].weight.data
+                    tgt_w.mul_(momentum).add_(eff_w.to(tgt_w.dtype), alpha=1.0 - momentum)
+            return
+
         for param_ctx, param_tgt in zip(self.context_encoder.parameters(), self.target_encoder.parameters()):
             param_tgt.data.mul_(momentum).add_(param_ctx.detach().data, alpha=1.0 - momentum)
 
@@ -191,12 +229,30 @@ class VJEPA2SSL(L.LightningModule):
         return encoder(pixel_values_videos=pixel_values_videos).last_hidden_state
 
     def save_backbone_pretrained(self, save_directory: str | Path, use_target_encoder: bool = True) -> None:
-        """Export an HF-compatible `VJEPA2Model` directory ready for `VJEPA2ForVideoClassification.from_pretrained`."""
+        """Export a clean HF-compatible `VJEPA2Model` directory ready for `VJEPA2ForVideoClassification`."""
         out_dir = Path(save_directory)
         out_dir.mkdir(parents=True, exist_ok=True)
         export_model = VJEPA2Model(self.config)
-        chosen_encoder = self.target_encoder if use_target_encoder else self.context_encoder
-        export_model.encoder.load_state_dict(chosen_encoder.state_dict())
+        if use_target_encoder or self.ssl_config.lora_rank <= 0:
+            chosen_encoder = self.target_encoder if use_target_encoder else self.context_encoder
+            export_model.encoder.load_state_dict(chosen_encoder.state_dict())
+        else:
+            merged_ctx = copy.deepcopy(self.context_encoder)
+            for mod in merged_ctx.modules():
+                if isinstance(mod, LoraLayer):
+                    mod.merge()
+            # Remap base_layer keys back to standard HF VJEPA2Encoder parameter names
+            export_sd = export_model.encoder.state_dict()
+            merged_modules = dict(merged_ctx.named_modules())
+            for name, mod in merged_modules.items():
+                if isinstance(mod, LoraLayer):
+                    export_sd[f"{name}.weight"] = mod.base_layer.weight.detach().cpu()
+                    if mod.base_layer.bias is not None:
+                        export_sd[f"{name}.bias"] = mod.base_layer.bias.detach().cpu()
+            for k, v in merged_ctx.state_dict().items():
+                if k in export_sd and "lora_" not in k:
+                    export_sd[k] = v.detach().cpu()
+            export_model.encoder.load_state_dict(export_sd)
         export_model.predictor.load_state_dict(self.predictor.state_dict())
         export_model.save_pretrained(out_dir)
 
@@ -356,10 +412,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
     parser.add_argument("--grad-accum", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-5, help="Gentle LR for domain adaptation (default: 1e-5)")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4 with LoRA)")
     parser.add_argument("--weight-decay", type=float, default=0.04)
+    parser.add_argument(
+        "--lora-rank",
+        type=int,
+        default=16,
+        help="LoRA rank on context_encoder attention Q/K/V/proj (0 = full encoder fine-tuning; default: 16)",
+    )
+    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA scaling alpha (default: 32)")
+    parser.add_argument(
+        "--ema-range",
+        type=float,
+        nargs=2,
+        default=[0.996, 0.9995],
+        metavar=("M_START", "M_END"),
+        help="Cosine EMA momentum range (default: 0.996 0.9995; use e.g. 0.98 0.996 for <500 steps)",
+    )
+    parser.add_argument(
+        "--no-grad-checkpoint",
+        action="store_true",
+        help="Disable gradient checkpointing (uses more VRAM)",
+    )
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--devices", default="auto", help="Devices per node, e.g. 'auto', '1', '2'")
+    parser.add_argument("--devices", default="auto", help="Devices count (e.g. '1', '2', 'auto') or comma list ('0,')")
     parser.add_argument(
         "--precision",
         default="bf16-mixed",
@@ -371,15 +447,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    torch.set_float32_matmul_precision("high")
     processor = AutoVideoProcessor.from_pretrained(args.model)
     ssl_cfg = VJEPA2SSLConfig(
         model_name_or_path=args.model,
         frames_per_clip=args.frames_per_clip,
         crop_size=processor.crop_size["height"],
+        ema_momentum_range=(float(args.ema_range[0]), float(args.ema_range[1])),
         lr=args.lr,
         weight_decay=args.weight_decay,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        gradient_checkpointing=not args.no_grad_checkpoint,
     )
-    model = VJEPA2SSL.from_pretrained(args.model, ssl_config=ssl_cfg)
+    backbone_dtype = (
+        torch.bfloat16
+        if args.precision == "bf16-mixed"
+        else (torch.float16 if args.precision == "16-mixed" else torch.float32)
+    )
+    model = VJEPA2SSL.from_pretrained(args.model, ssl_config=ssl_cfg, torch_dtype=backbone_dtype)
     datamodule = UnlabeledClipDataModule(
         data_dir=args.data_dir,
         processor=processor,
@@ -395,6 +481,7 @@ def main(argv: list[str] | None = None) -> None:
         precision=args.precision,
         accumulate_grad_batches=args.grad_accum,
         gradient_clip_val=1.0,
+        log_every_n_steps=5,
         default_root_dir=args.output_dir,
     )
     trainer.fit(model, datamodule=datamodule)

@@ -297,11 +297,13 @@ def test_vjepa2_ssl_lightning_forward_and_trainer_fit(tmp_path):
         ),
     )
 
-    # Verify target_encoder is frozen and stays in eval() even when model.train() is called
+    # Verify target_encoder is frozen, context_encoder base weights are frozen (only LoRA trainable), & predictor trainable
     ssl_model.train()
     assert not ssl_model.target_encoder.training
     assert all(not p.requires_grad for p in ssl_model.target_encoder.parameters())
-    assert any(p.requires_grad for p in ssl_model.context_encoder.parameters())
+    ctx_trainable = sum(p.numel() for p in ssl_model.context_encoder.parameters() if p.requires_grad)
+    ctx_total = sum(p.numel() for p in ssl_model.context_encoder.parameters())
+    assert 0 < ctx_trainable < ctx_total
     assert any(p.requires_grad for p in ssl_model.predictor.parameters())
 
     videos = torch.randn(2, 8, 3, 64, 64)
@@ -322,8 +324,8 @@ def test_vjepa2_ssl_lightning_forward_and_trainer_fit(tmp_path):
         )
         assert torch.allclose(hf_pred, our_pred, atol=1e-5)
 
-    # End-to-end Lightning Trainer.fit() step (exercises training_step, configure_optimizers, EMA optimizer_step)
-    before_tgt = next(ssl_model.target_encoder.parameters()).clone()
+    # End-to-end Lightning Trainer.fit() step (exercises LoRA + grad_checkpoint + EMA delta fold into target_encoder)
+    before_tgt_q = ssl_model.target_encoder.layer[0].attention.query.weight.clone()
     loader = DataLoader([torch.randn(8, 3, 64, 64) for _ in range(4)], batch_size=2)
     trainer = L.Trainer(
         max_epochs=1,
@@ -336,8 +338,8 @@ def test_vjepa2_ssl_lightning_forward_and_trainer_fit(tmp_path):
     )
     trainer.fit(ssl_model, train_dataloaders=loader)
 
-    after_tgt = next(ssl_model.target_encoder.parameters())
-    assert not torch.allclose(before_tgt, after_tgt)
+    after_tgt_q = ssl_model.target_encoder.layer[0].attention.query.weight
+    assert not torch.allclose(before_tgt_q, after_tgt_q)
 
     ckpt_dir = tmp_path / "adapted_vjepa2"
     ssl_model.save_backbone_pretrained(ckpt_dir)

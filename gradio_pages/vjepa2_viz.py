@@ -45,6 +45,8 @@ def load_model_cached(model_name_or_path: str, device_str: str) -> tuple[VJEPA2S
         cfg = VJEPA2SSLConfig(
             model_name_or_path=key[0],
             crop_size=processor.crop_size["height"],
+            lora_rank=0,
+            gradient_checkpointing=False,
         )
         model = VJEPA2SSL.from_pretrained(key[0], ssl_config=cfg, torch_dtype=dtype)
         model.eval().to(device_str)
