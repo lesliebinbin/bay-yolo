@@ -29,8 +29,10 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoVideoProcessor
 
-from models.vjepa2_ssl import VJEPA2SSL, VJEPA2SSLConfig, read_video_clip_rgb
+from config.vjepa2_config import VJEPA2SSLConfig
+from models.vjepa2_ssl import VJEPA2SSL
 from utils.masking import MultiBlockMaskGenerator3D
+from utils.media import read_video_clip_rgb
 
 DEFAULT_MODEL = "facebook/vjepa2-vitl-fpc64-256"
 _MODEL_CACHE: dict[tuple[str, str], tuple[VJEPA2SSL, object]] = {}
@@ -45,6 +47,8 @@ def load_model_cached(model_name_or_path: str, device_str: str) -> tuple[VJEPA2S
         cfg = VJEPA2SSLConfig(
             model_name_or_path=key[0],
             crop_size=processor.crop_size["height"],
+            lora_rank=0,
+            gradient_checkpointing=False,
         )
         model = VJEPA2SSL.from_pretrained(key[0], ssl_config=cfg, torch_dtype=dtype)
         model.eval().to(device_str)

@@ -8,7 +8,7 @@ import torch
 
 @dataclass
 class VJEPA2SSLConfig:
-    """Configuration for V-JEPA 2 self-supervised domain adaptation and optimization."""
+    """Configuration for V-JEPA 2 self-supervised domain adaptation, LoRA, and optimization."""
 
     model_name_or_path: str = "facebook/vjepa2-vitl-fpc64-256"
     frames_per_clip: int = 16
@@ -20,8 +20,12 @@ class VJEPA2SSLConfig:
     ema_momentum_range: tuple[float, float] = (0.996, 0.9995)
     loss_beta: float = 1.0
     normalize_targets: bool = True
-    lr: float = 1e-5
+    lr: float = 1e-4
     weight_decay: float = 0.04
+    lora_rank: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    gradient_checkpointing: bool = True
 
 
 @dataclass

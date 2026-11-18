@@ -12,16 +12,20 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+from einops import repeat
 import lightning as L
+from peft import LoraConfig, inject_adapter_in_model
+from peft.tuners.lora import LoraLayer
 import torch
 import torch.nn.functional as F
-from einops import repeat
 from transformers import VJEPA2Config, VJEPA2Model
 from transformers.models.vjepa2.modeling_vjepa2 import apply_masks
 
 from config.vjepa2_config import VJEPA2SSLConfig, VJEPA2SSLOutput
 from utils.masking import MultiBlockMaskGenerator3D
 from utils.training_utils import cosine_ema_schedule
+
+LORA_ATTENTION_TARGET_REGEX = r".*attention\.(query|key|value|proj)$"
 
 
 class VJEPA2SSL(L.LightningModule):
@@ -36,12 +40,36 @@ class VJEPA2SSL(L.LightningModule):
         self.ssl_config = ssl_config or VJEPA2SSLConfig()
         self.config: VJEPA2Config = backbone.config
 
-        self.context_encoder = backbone.encoder
-        self.predictor = backbone.predictor
-
+        # Copy clean unadapted encoder for the stop-gradient EMA teacher before enabling checkpointing or LoRA
         self.target_encoder = copy.deepcopy(backbone.encoder)
         self.target_encoder.eval()
         self.target_encoder.requires_grad_(False)
+
+        if self.ssl_config.gradient_checkpointing:
+            if hasattr(backbone, "activation_checkpointing_enable"):
+                backbone.activation_checkpointing_enable(
+                    activation_checkpointing_kwargs={"use_reentrant": False}
+                )
+            else:
+                backbone.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+
+        self.context_encoder = backbone.encoder
+        self.predictor = backbone.predictor
+        # HF from_pretrained() returns modules in eval() mode, which disables HF GradientCheckpointingLayer
+        # (`if self.gradient_checkpointing and self.training`) until explicitly placed in train() mode.
+        self.context_encoder.train()
+        self.predictor.train()
+
+        if self.ssl_config.lora_rank > 0:
+            lora_cfg = LoraConfig(
+                r=self.ssl_config.lora_rank,
+                lora_alpha=self.ssl_config.lora_alpha,
+                lora_dropout=self.ssl_config.lora_dropout,
+                target_modules=LORA_ATTENTION_TARGET_REGEX,
+            )
+            inject_adapter_in_model(lora_cfg, self.context_encoder)
 
         self.mask_generator = MultiBlockMaskGenerator3D(
             num_targets=self.ssl_config.num_targets,
@@ -82,6 +110,8 @@ class VJEPA2SSL(L.LightningModule):
     def encode_context(self, pixel_values_videos: torch.Tensor, context_idx: torch.Tensor) -> torch.Tensor:
         """Encode ONLY visible `context_idx` `(B, N_ctx)` patches while preserving 3D-RoPE positions."""
         hidden_states = apply_masks(self.context_encoder.embeddings(pixel_values_videos), [context_idx])
+        if self.training and self.ssl_config.gradient_checkpointing and not hidden_states.requires_grad:
+            hidden_states = hidden_states.requires_grad_(True)
         for layer_module in self.context_encoder.layer:
             hidden_states = layer_module(hidden_states, position_mask=context_idx)[0]
         return self.context_encoder.layernorm(hidden_states)
@@ -133,9 +163,18 @@ class VJEPA2SSL(L.LightningModule):
 
     @torch.no_grad()
     def update_target_encoder(self, momentum: float = 0.998) -> None:
-        """Exponential Moving Average update: `θ_target <- m * θ_target + (1 - m) * θ_context`."""
+        """Exponential Moving Average update (`θ_target <- m * θ_target + (1 - m) * θ_context_effective`)."""
         if not (0.0 <= momentum <= 1.0):
             raise ValueError(f"EMA momentum must be in [0, 1], got {momentum}")
+        if self.ssl_config.lora_rank > 0:
+            tgt_modules = dict(self.target_encoder.named_modules())
+            for name, mod in self.context_encoder.named_modules():
+                if isinstance(mod, LoraLayer):
+                    eff_w = mod.base_layer.weight.detach() + mod.get_delta_weight("default").detach()
+                    tgt_w = tgt_modules[name].weight.data
+                    tgt_w.mul_(momentum).add_(eff_w.to(tgt_w.dtype), alpha=1.0 - momentum)
+            return
+
         for param_ctx, param_tgt in zip(self.context_encoder.parameters(), self.target_encoder.parameters()):
             param_tgt.data.mul_(momentum).add_(param_ctx.detach().data, alpha=1.0 - momentum)
 
@@ -146,12 +185,28 @@ class VJEPA2SSL(L.LightningModule):
         return encoder(pixel_values_videos=pixel_values_videos).last_hidden_state
 
     def save_backbone_pretrained(self, save_directory: str | Path, use_target_encoder: bool = True) -> None:
-        """Export an HF-compatible `VJEPA2Model` directory ready for `VJEPA2ForVideoClassification.from_pretrained`."""
+        """Export a clean HF-compatible `VJEPA2Model` directory ready for `VJEPA2ForVideoClassification`."""
         out_dir = Path(save_directory)
         out_dir.mkdir(parents=True, exist_ok=True)
         export_model = VJEPA2Model(self.config)
-        chosen_encoder = self.target_encoder if use_target_encoder else self.context_encoder
-        export_model.encoder.load_state_dict(chosen_encoder.state_dict())
+        if use_target_encoder or self.ssl_config.lora_rank <= 0:
+            chosen_encoder = self.target_encoder if use_target_encoder else self.context_encoder
+            export_model.encoder.load_state_dict(chosen_encoder.state_dict())
+        else:
+            merged_ctx = copy.deepcopy(self.context_encoder)
+            for mod in merged_ctx.modules():
+                if isinstance(mod, LoraLayer):
+                    mod.merge()
+            export_sd = export_model.encoder.state_dict()
+            for name, mod in merged_ctx.named_modules():
+                if isinstance(mod, LoraLayer):
+                    export_sd[f"{name}.weight"] = mod.base_layer.weight.detach().cpu()
+                    if mod.base_layer.bias is not None:
+                        export_sd[f"{name}.bias"] = mod.base_layer.bias.detach().cpu()
+            for k, v in merged_ctx.state_dict().items():
+                if k in export_sd and "lora_" not in k:
+                    export_sd[k] = v.detach().cpu()
+            export_model.encoder.load_state_dict(export_sd)
         export_model.predictor.load_state_dict(self.predictor.state_dict())
         export_model.save_pretrained(out_dir)
 

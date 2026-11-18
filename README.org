@@ -16,10 +16,17 @@ src/
 │   ├── crops.py                # BBoxCropper & HandCropper: detection & forearm-projected crops
 │   ├── pose_features.py        # PoseFeatureExtractor: scale-invariant 17-keypoint features
 │   └── masking.py              # MultiBlockMaskGenerator3D: vectorized 3D block mask sampler
+├── config/
+│   └── vjepa2_config.py        # VJEPA2SSLConfig & VJEPA2SSLOutput dataclasses
+├── dataset/
+│   ├── vjepa2_dataset.py       # UnlabeledClipDataset: recursive video clip sampler
+│   └── vjepa2_datamodule.py    # UnlabeledClipDataModule: LightningDataModule + HF processor
 ├── preprocessing/
 │   └── roi_clip_slicer.py      # Slice long CCTV videos into YOLO-normalized ROI .mp4 clips
-└── models/
-    └── vjepa2_ssl.py           # V-JEPA 2 self-supervised domain adaptation (PyTorch Lightning)
+├── models/
+│   └── vjepa2_ssl.py           # V-JEPA 2 SSL LightningModule (LoRA + activation checkpointing + EMA)
+└── tasks/
+    └── train.py                # CLI task entrypoint for V-JEPA 2 domain adaptation training
 #+end_example
 
 * Setup
@@ -64,8 +71,8 @@ uv run python -m preprocessing.roi_clip_slicer \
   --source videos/sample01.mp4 --clip-sec 4 --stride-sec 2 --target-fps 5 --resize 256 \
   --split 3:1:1 --seed 42 --save data/unlabeled
 
-# Self-supervised V-JEPA 2 domain adaptation (PyTorch Lightning)
-uv run python -m models.vjepa2_ssl --data-dir data/unlabeled/clips/train --output-dir checkpoints/vjepa2_bay
+# Self-supervised V-JEPA 2 domain adaptation (PyTorch Lightning + LoRA + activation checkpointing)
+uv run python -m tasks.train --data-dir data/unlabeled/clips/train --output-dir checkpoints/vjepa2_bay
 #+end_src
 
 * Check
