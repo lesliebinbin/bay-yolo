@@ -363,3 +363,125 @@ def test_vjepa2_ssl_lightning_forward_and_trainer_fit(tmp_path):
     assert t_args.gradient_checkpointing is True and t_args.lora_rank == 16
     assert parse_train_args(["--data-dir", str(tmp_path), "--no-gradient-checkpointing"]).gradient_checkpointing is False
     assert parse_train_args(["--data-dir", str(tmp_path), "--no-grad-checkpoint"]).gradient_checkpointing is False
+
+
+def test_field_of_view_crops(tmp_path):
+    import cv2
+    import numpy as np
+
+    from utils.field_of_view import PERSON_FOV, FieldOfView
+
+    # 144x256 frame, subject box 140x72 -> pad 0.10 adds 7px x / 3.6px y per side
+    frame = np.zeros((144, 256, 3), dtype=np.uint8)
+    box = (58, 36, 198, 108)
+    frame[40:100, 60:190] = 255  # painted region fully inside the box
+
+    fov = FieldOfView(pad=0.10)
+    assert fov.compute_box(box, frame.shape[:2]) == (51, 32, 205, 112)
+    assert fov.output_size(box, frame.shape[:2]) == (154, 80)  # native, no resize
+
+    crop = fov.crop(frame, box)
+    assert crop.shape == (80, 154, 3)
+    assert int(crop.max()) == 255  # subject content preserved
+
+    # upscale=2 -> 308x160 (INTER_CUBIC upsize)
+    fov_x2 = FieldOfView(pad=0.10, upscale=2.0)
+    assert fov_x2.output_size(box, frame.shape[:2]) == (308, 160)
+    assert fov_x2.crop(frame, box).shape == (160, 308, 3)
+
+    # target_width wins and keeps aspect (154:80 -> 256:~133 -> even 132)
+    fov_tw = FieldOfView(pad=0.10, target_width=256)
+    assert fov_tw.output_size(box, frame.shape[:2]) == (256, 132)
+
+    # clamping at right/bottom edges (pad runs past the frame)
+    assert fov.compute_box((250, 140, 260, 150), (144, 256)) == (250, 140, 256, 144)
+
+    # Square crops: shorter side widened to the longer one, centered, in frame
+    fov_sq = FieldOfView(pad=0.10, square=True)
+    # padded 154x80 -> side 144 (frame height) -> (56,0,200,144)
+    assert fov_sq.compute_box(box, frame.shape[:2]) == (56, 0, 200, 144)
+    # not clamped: padded 66x110 -> side 110, centered -> (75,45,185,155)
+    assert fov_sq.compute_box((100, 50, 160, 150), (200, 300)) == (75, 45, 185, 155)
+
+    # Regression: box clamped to the bottom edge with an odd span used to
+    # degenerate (the even-dims fix assigned cy1-1 to cy2). Real case from a
+    # 2560x1440 CCTV frame: person at the very bottom of the image.
+    edge_box = (0.0, 1282.3790283203125, 155.18719482421875, 1436.7440185546875)
+    assert fov.compute_box(edge_box, (1440, 2560)) == (0, 1274, 164, 1440)  # 164x166, even
+    # general bottom-edge case: span 21 odd -> cy1 moves up by 1
+    assert fov.compute_box((10, 80, 60, 99), (100, 200)) == (8, 78, 62, 100)
+
+    # Graceful degradation: whole-frame box on an odd-sized frame cannot be
+    # made even; it must be returned as-is, not raised.
+    fov_odd = FieldOfView(pad=0.10)
+    assert fov_odd.compute_box((0, 0, 201, 101), (101, 201)) == (0, 0, 201, 101)
+
+    # degenerate inputs are rejected
+    with pytest.raises(ValueError):
+        fov.compute_box((100, 100, 100, 200), (144, 256))
+    with pytest.raises(ValueError):
+        FieldOfView(pad=-0.1)
+    with pytest.raises(ValueError):
+        FieldOfView(upscale=0.0)
+
+    # PERSON_FOV preset: pad 0.1 + square + 2x upscale; save_crop writes a valid JPEG.
+    # 154x80 padded -> square 144x144 -> 288x288 output
+    assert (PERSON_FOV.pad, PERSON_FOV.upscale, PERSON_FOV.square) == (0.10, 2.0, True)
+    out_path = tmp_path / "fov" / "person_0.jpg"
+    PERSON_FOV.save_crop(frame, box, out_path)
+    assert out_path.is_file()
+    loaded = cv2.imread(str(out_path))
+    assert loaded is not None and loaded.shape == (288, 288, 3)
+
+
+def test_fov_extract_track_writer(tmp_path):
+    import cv2
+    import numpy as np
+
+    from tasks.fov_extract import TrackState, TrackWriter, even_size, fit_to_canvas
+
+    assert even_size(154, 80) == (154, 80)
+    assert even_size(155, 81) == (156, 80)
+    assert even_size(1, 1) == (2, 2)
+
+    # fit_to_canvas: 60x40 into (200, 100) -> scale 2.5 -> 150x100 centered, black side bars
+    img = np.full((40, 60, 3), 200, dtype=np.uint8)
+    out = fit_to_canvas(img, (200, 100))
+    assert out.shape == (100, 200, 3)
+    assert int(out[50, 100].max()) == 200     # center filled
+    assert int(out[50, 5].max()) == 0         # left bar black
+    assert int(out[50, 195].max()) == 0       # right bar black
+    assert fit_to_canvas(np.full((100, 200, 3), 7, dtype=np.uint8), (200, 100)).shape == (100, 200, 3)
+
+    def crop(w: int, h: int, value: int) -> np.ndarray:
+        return np.full((h, w, 3), value, dtype=np.uint8)
+
+    # frames mode: 6 crops, track 3 "worker"
+    fw = TrackWriter(TrackState(track_id=3, label="worker"), tmp_path / "out_f", fps=25.0, output="frames", min_frames=5, warmup=3)
+    for i in range(1, 7):
+        fw.add(i, crop(120, 200, i * 20), 0.9)
+    row = fw.finalize()
+    assert row is not None and row["kept"] is True and row["num_frames"] == 6
+    track_dir = tmp_path / "out_f" / "003_worker"
+    assert sorted(p.name for p in track_dir.glob("*.jpg")) == [f"{i:05d}.jpg" for i in range(1, 7)]
+
+    # video mode: canvas from median of buffered sizes; 6 even-sized frames written
+    vw = TrackWriter(TrackState(track_id=7, label="truck"), tmp_path / "out_v", fps=25.0, output="video", min_frames=5, warmup=3)
+    for i in range(1, 7):
+        vw.add(i, crop(120 + i, 200, i * 20), 0.8)
+    row = vw.finalize()
+    assert row is not None and row["video"] == "007_truck.mp4"
+    cap = cv2.VideoCapture(str(tmp_path / "out_v" / "007_truck.mp4"))
+    assert cap.isOpened()
+    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 6
+    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    assert w % 2 == 0 and h % 2 == 0
+    cap.release()
+
+    # short track below min_frames is dropped: no files remain
+    sw = TrackWriter(TrackState(track_id=9, label="worker"), tmp_path / "out_s", fps=25.0, output="both", min_frames=5, warmup=2)
+    for i in range(1, 4):
+        sw.add(i, crop(100, 100, 20), 0.9)
+    assert sw.finalize() is None
+    assert not (tmp_path / "out_s" / "009_worker").exists()
+    assert not (tmp_path / "out_s" / "009_worker.mp4").exists()

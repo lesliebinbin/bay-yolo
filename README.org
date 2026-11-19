@@ -14,10 +14,14 @@ src/
 │   ├── time_span.py            # TimeSpan: HH:MM:SS parsing, seeking & clip boundaries
 │   ├── media.py                # MediaSource & FrameDisplay: stream/video/image I/O & viewer
 │   ├── crops.py                # BBoxCropper & HandCropper: detection & forearm-projected crops
+│   ├── field_of_view.py        # FieldOfView: padded subject FoV crops (pad/upscale/target width)
 │   ├── pose_features.py        # PoseFeatureExtractor: scale-invariant 17-keypoint features
-│   └── masking.py              # MultiBlockMaskGenerator3D: vectorized 3D block mask sampler
+│   ├── masking.py              # MultiBlockMaskGenerator3D: vectorized 3D block mask sampler
+│   └── roi.py                  # YoloBox & parse_yolo_roi: shared YOLO normalized-ROI geometry
 ├── config/
-│   └── vjepa2_config.py        # VJEPA2SSLConfig & VJEPA2SSLOutput dataclasses
+│   ├── vjepa2_config.py        # VJEPA2SSLConfig & VJEPA2SSLOutput dataclasses
+│   └── trackers/
+│       └── bytetrack_tight.yaml  # Tighter ByteTrack profile (fewer ID switches/duplicates)
 ├── dataset/
 │   ├── vjepa2_dataset.py       # UnlabeledClipDataset: recursive video clip sampler
 │   └── vjepa2_datamodule.py    # UnlabeledClipDataModule: LightningDataModule + HF processor
@@ -26,7 +30,9 @@ src/
 ├── models/
 │   └── vjepa2_ssl.py           # V-JEPA 2 SSL LightningModule (LoRA + activation checkpointing + EMA)
 └── tasks/
-    └── train.py                # CLI task entrypoint for V-JEPA 2 domain adaptation training
+    ├── train.py                # CLI task entrypoint for V-JEPA 2 domain adaptation training
+    ├── roi_extract.py          # CLI task: full-duration per-item ROI crops (no fps/res downscale)
+    └── fov_extract.py          # CLI task: per-track subject FoV crops as frames or video
 #+end_example
 
 * Setup

@@ -1,0 +1,68 @@
+# Item ROI Configurations
+# Coordinates are normalized YOLO format: [x_center, y_center, width, height]
+# angle_type: A = Video 01 (Overhead), B = Video 02 (Side)
+
+personnel_id:
+  - angle_type: A
+    roi: [0.5, 0.5, 0.8, 0.8]
+    is_temporal: false
+  - angle_type: B
+    roi: [0.5, 0.5, 0.8, 0.8]
+    is_temporal: false
+
+ppe_helmet:
+  - angle_type: A
+    roi: [0.5, 0.5, 0.8, 0.8]
+    is_temporal: false
+  - angle_type: B
+    roi: [0.5, 0.5, 0.8, 0.8]
+    is_temporal: false
+
+# ppe_gloves: No ROI available due to resolution
+
+driver_location:
+  - angle_type: A
+    roi: [0.4, 0.6, 0.2, 0.3]
+    is_temporal: false
+  - angle_type: B
+    roi: [0.2, 0.5, 0.3, 0.6]
+    is_temporal: false
+
+prohibited_behavior:
+  - angle_type: B
+    roi: [0.25, 0.75, 0.5, 0.5]
+    is_temporal: true
+
+vehicle_verification:
+  - angle_type: A
+    roi: [0.4, 0.7, 0.3, 0.3]
+    is_temporal: true
+  - angle_type: B
+    roi: [0.2, 0.6, 0.2, 0.4]
+    is_temporal: true
+
+airtightness_check:
+  - angle_type: B
+    roi: [0.7, 0.5, 0.3, 0.5]
+    is_temporal: true
+
+emergency_valve:
+  - angle_type: B
+    roi: [0.7, 0.5, 0.3, 0.5]
+    is_temporal: true
+
+loading_inspection:
+  - angle_type: A
+    roi: [0.5, 0.5, 0.8, 0.8]
+    is_temporal: true
+  - angle_type: B
+    roi: [0.5, 0.5, 0.8, 0.8]
+    is_temporal: true
+
+post_loading_evac:
+  - angle_type: A
+    roi: [0.5, 0.9, 0.8, 0.2]
+    is_temporal: true
+  - angle_type: B
+    roi: [0.5, 0.9, 0.8, 0.2]
+    is_temporal: true
