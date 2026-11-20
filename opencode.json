@@ -8,16 +8,16 @@
         "baseURL": "http://127.0.0.1:11436/v1"
       },
       "models": {
-        "gemma4-26b": {
-          "modelID": "gemma4-26b",
-          "name": "Gemma 4 26B (llama.cpp)",
+        "gemma4-31b": {
+          "modelID": "gemma4-31b",
+          "name": "Gemma 4 31B (llama.cpp)",
           "capabilities": {
             "tools": true,
             "input": ["text", "image"],
             "output": ["text"]
           },
           "limit": {
-            "context": 32768,
+            "context": 262144,
             "output": 8192
           },
           "compatibility": {
