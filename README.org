@@ -81,6 +81,17 @@ uv run python -m preprocessing.roi_clip_slicer \
 uv run python -m tasks.train --data-dir data/unlabeled/clips/train --output-dir checkpoints/vjepa2_bay
 #+end_src
 
+* ROI detail viewer
+
+Run =uv run python gradio_pages/details_analyze.py= and open http://127.0.0.1:7862.
+Upload a video and enter a normalized YOLO ROI (=x_center y_center width height=).
+The default selects the bottom-left quarter. For an already-cropped clip such as =fov_out/002_person.mp4=, enter =0.5 0.5 1 1=
+to use the full frame. Set the start time and duration, then select =Process ROI clip=.
+The resulting video combines the ROI, pose skeletons,
+left/right hand crops, and padded person views on one playback timeline.
+People are ordered left-to-right per frame; tiles are not persistent identities.
+Use =--model /path/to/yolo26s-pose.pt= for local pose weights.
+
 * Check
 
 #+begin_src shell
